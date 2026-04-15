@@ -1,6 +1,46 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import brentq
+
+GENERATE_MATRICES = True    # Generate new matrices (vs load previously-generated ones)
+SINGLE_MATRIX = True        # Generate/load only one heatmap per model
+RUN_PSYCHRO = False         # Process heatmap for Psychrometric model
+RUN_ISO = True              # Process heatmap for ISO model
+RUN_LILJEGREN = True        # Process heatmap for Liljegren model
+
+# Standard inputs for single gen:
+V_A = 0.5
+T_A = 35
+T_G = 45
+REL_H = 75
+BARO = 1020
+RAD = 850
+Z_ANGLE = 35
+
+# Universal constants:
+pi = 3.14159265359                  # ratio of a circle's circumference to its diameter
+sigma = 0.0000000567                # Stefan-Boltzmann constant, W/m^2*K^4
+M_h2o = 0.018015                    # molecular weight of water, kg/mol
+M_air = 0.02897                     # molecular weight of air, kg/mol
+mu_0 = 0.00001716                   # Sutherland reference constant for air viscosity at reference temp, kg/ms
+t_0K = 273.15                       # reference temperature for mu_0, Kelvin
+S_K = 110.4                         # Sutherland temperature, Kelvin
+R_gas = 8.31446                     # molar gas constant, J/mol*K
+R_air = R_gas/M_air                 # specific gas constant for air, J
+c_p = 1005.0                        # specific heat capacity of dry air, J/K*kg
+P_0 = 101325                        # pressure constant?, Pascals  TODO: verify
+D_0 = 0.0000226                     # diffusivity constant for water vapor in air?, m^2/s  TODO: verify
+g = 9.81                            # Earth gravitational constant, m/s^2
+S_0 = 1367                          # maximum solar irradiance sans atmosphere, W/m^2
+# Experimental constants (experimentally-fixed variables):
+D_wick = 0.007                      # wick diameter, m
+L_wick = 0.0254                     # wick length, m
+A_wick = pi*D_wick*L_wick           # wick surface area, as prescribed in Liljegren (m^2)
+E_wick = 0.95                       # wick emissivity, ratio
+E_atm = 0.85                        # atmospheric emissivity, ratio TODO: double-check approximation
+alpha_wick = 0.95                   # wick albedo, ratio
+alpha_sfc = 0.45                    # estimated albedo of surface, ratio
 
 # Calculates rough dew point, for starting guess:
 def dew_pt(DB, RH):
@@ -18,13 +58,19 @@ def dew_pt(DB, RH):
 def mean_radiant_from_globe(GT, AV, DB):
     return np.float_power(np.float_power(GT+273,4)+(((110000000*np.float_power(AV,0.6))/(0.95*np.float_power(0.15,0.4)))*(GT-DB)),0.25)-273
 
-# Returns partial vapor pressure in kPa:
-def Buck_equation(DB):
-    d = DB
-    if d == -257.14:
-        d = -257.15
-        print("DB ERR! new DB=", d)
-    return 0.61121 * np.exp((18.678-(d/234.5))*(d/(257.14+d)))
+# Returns partial vapor pressure in hPa:
+def Buck_equation(temp_C):
+    t = temp_C
+    if t == -257.14: t = -257.141
+    return 6.1121 * np.exp((18.678-(t/234.5))*(t/(257.14+t)))
+
+# Wrapper converting Buck equation result to kiloPascals:
+def Buck_eq_kPa(temp_C):
+    return Buck_equation(temp_C) / 10.0
+
+# Wrapper converting Buck equation result to Pascals:
+def Buck_eq_Pa(temp_C):
+    return 100 * Buck_equation(temp_C)
 
 # Approximates wet bulb temp from v_a, t_a, t_g, RH, and pressure:
 def approximate_wet_bulb(v, a, g, h):
@@ -66,14 +112,8 @@ def approximate_wet_bulb(v, a, g, h):
 
     return w_guess
 
-# Approximates wet bulb temp from v_a, t_a, t_g, RH, and pressure:
-def approximate_wet_bulb_ISO(v, a, g, h, p):
-    w_psy = 0
-    if v == 0:
-        return psychrometric_wet_bulb(a, p, h)
-    if v < 0.01:    # do not factor wind if near-zero to avoid artifacts inherent to ISO model
-        w_psy = psychrometric_wet_bulb(a, p, h)
-
+# Approximates wet bulb temp from v_a, t_a, t_g, and RH:
+def approximate_wet_bulb_ISO(v, a, g, h):
     # Arbitrary starting values:
     w_guess = dew_pt(a, h)
     p_w = Buck_equation(w_guess)
@@ -91,7 +131,6 @@ def approximate_wet_bulb_ISO(v, a, g, h, p):
         else:
             print("ERROR! LOOPED TOO LONG!")
             print("dumped results: ", result_prev, ", ", result)
-            # return w_guess
             break
         
         w_guess = w_guess + incr * dir
@@ -104,15 +143,10 @@ def approximate_wet_bulb_ISO(v, a, g, h, p):
         result = term1-term2
 
         if (abs(result) < 0.02):
-                # return w_guess
                 break
         if (result < 0 and result_prev > 0) or (result_prev < 0 and result > 0):
             dir = dir * -1
             incr = incr/10
-    
-    if v < 0.01:
-        return w_psy*(1-(v/0.01)) + w_guess*(v/0.01)
-        # return w_psy*(1-(v/0.5)) + w_guess*(v/0.5)
 
     return w_guess
 
@@ -148,7 +182,8 @@ def psychrometric_wet_bulb(a, p, h):
     
     return w_guess
 
-def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2):
+# AI Slop liljegren model:
+def OLD_wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2):
     # Final target value, wet bulb temperature:
     t_wC = t_aC                         # use ambient temp as starting guess, Celsius
 
@@ -231,7 +266,7 @@ def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2):
 
         # Calculate final net heat flux:
         Q_net_prev = Q_net
-        Q_net = Q_evap + Q_rad + Q_conv                         # total net heat flux: when Q_net ≈ 0, t_w is correct
+        Q_net = Q_rad + Q_conv - Q_evap                         # total net heat flux: when Q_net ≈ 0, t_w is correct
         # print(Q_net_prev, Q_net)
 
         if abs(Q_net) < 0.02:
@@ -245,26 +280,119 @@ def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2):
     
     return t_wC
 
+# Returns ΔF_net/A term using Eq.(12) from Liljegren:
+def deltaFnetPerA(zenithAngle, S_rad, temp_aC, temp_wC):
+    S_max = 0
+    f_dir = 0
+    if zenithAngle <= 89.5:
+        S_max = S_0 * np.cos(np.deg2rad(zenithAngle))
+        Sstar = S_rad/S_max
+        f_dir = np.exp(3-1.34*Sstar-1.65/Sstar)
+    deltaFNetperA_T1 = sigma * E_wick * (0.5 * (1 + E_atm) * np.float_power(temp_aC,4) - np.float_power(temp_wC,4))
+    deltaFNetperA_T2 = (1 - alpha_wick) * S_rad * ((1 - f_dir) * (1 + (D_wick / (4 * L_wick))) + f_dir * ((np.tan(np.deg2rad(zenithAngle)) / pi) + (D_wick / (4 * L_wick)) + alpha_sfc))
+    return deltaFNetperA_T1 + deltaFNetperA_T2
 
-GENERATE_MASTER_ARRAY = False
+# Returns calculated WBT per the method outlined in Liljegren paper:
+def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, zenithAngle_deg):
+    # Final target value, wet bulb temperature:
+    t_wC = t_aC                         # use ambient temp as starting guess, Celsius
 
-# SCRIPT START:
-tgMax = 3
-gm = 10.0
-gb = 50.0
-taMax = 201
-am = 0.25
-ab = 10.0
-vaMax = 201
-vm = 0.0075
-vb = 0.0
-rhMax = 3
-hm = 10.0
-hb = 60.0
-WBGT = np.zeros((tgMax, taMax, vaMax, rhMax))
+    # input unit conversions:
+    t_aK = t_aC + 273.15                # Celsius -> Kelvin
+    rh = rh_percent/100.0               # percent -> ratio
+    P = p_mBar*100                      # millibar -> Pascal
+    V = windspeed_mps                   # N/A; better variable name
+    S = radiance_Wpm2                   # N/A; better variable name
+    s_za = zenithAngle_deg              # solar zenith angle, degrees TODO: estimate mock data? get actual data from lat/long/time?
+
+    e_sa = Buck_eq_Pa(t_aC)             # saturation vapor pressure at ambient temperature, Pascals
+    e_a = rh * e_sa                     # partial water vapor pressure at ambient temperature, Pascals
+    A = A_wick                          # wick surface area as prescribed in Liljegren, m^2
+    k = 0.0241 * np.float_power(t_aK/273.15,0.9)                    # thermal conductivity of air, W/m*k
+    q = 0.622 * e_a / (P-0.378*e_a)                                 # specific humidity, ratio TODO: should either/both e_a be e_w instead?
+    rho = P / (R_air*t_aK*(1+0.61*q))                               # fluid density of air, kg/m^3
+    mu = mu_0*np.float_power(t_aK/t_0K,3/2)*(t_0K+S_K)/(t_aK+S_K)   # fluid viscosity of air (Sutherland eq.), kg/m*s
+    D_v = D_0 * np.float_power(t_aK/273.15,1.75) * P_0/P            # water vapor diffusivity in air, m^2/s
+
+    Re = (rho*V*D_wick)/mu                                          # Reynolds number (convection strength), unitless TODO: verify?
+    Pr = (c_p*mu)/k                                                 # Prandtl number
+    Sc = mu/(rho*D_v)                                               # Schmidt number
+
+    # a,b,c prescribed by Liljegren:
+    a = 0.56
+    b = 0.281
+    c = 0.4
+    h = (k/D_wick)*b*np.float_power(Re,1-c)*np.float_power(Pr,1-a)  # convective heat coefficient, W/m^2*K
+
+    def computeEq9(t_wCguess):
+        # Calculate new values:
+        e_sw = Buck_eq_Pa(t_wC)                             # saturation vapor pressure at wet bulb temperature, Pascals
+        e_w = rh * e_sw                                     # partial water vapor pressure at wet bulb temperature, Pascals
+        DFnetPerA = deltaFnetPerA(s_za, S, t_aC, t_wC)      # Eq.(12) result
+        deltaH = 2500900 - 2439*t_wCguess                   # latent heat of vaporization at wet bulb temp, J/kg
+
+        # Eq.(9):
+        t_wCResult = t_aC-(deltaH/c_p) * (M_h2o/M_air) * np.float_power(Pr/Sc,a) * ((e_w-e_a)/(P-e_w)) + (DFnetPerA/h)
+        t_wDiff = t_wCResult - t_wCguess
+        return t_wDiff                                      # difference between guess and calculation; guess is correct when t_wDiff≈0
+    try:
+        return brentq(computeEq9, dew_pt(t_aC,rh)-50.0, 100.0, xtol=0.02, maxiter=1000)
+    except ValueError:
+        return 0.0
+    
 
 
-if (GENERATE_MASTER_ARRAY):
+#####################
+### SCRIPT START: ###
+#####################
+# WBGT_PSY = np.zeros(())
+# WBGT_ISO = np.zeros(())
+# WBGT_LIL = np.zeros(())
+tgMax = 0
+gm = 0
+gb = 0
+taMax = 0
+am = 0
+ab = 0
+vaMax = 0
+vm = 0
+vb = 0
+rhMax = 0
+hm = 0
+hb = 0
+
+if GENERATE_MATRICES:
+    tgMax = 2
+    gm = 10.0
+    gb = 45.0
+    taMax = 51
+    am = 1.0
+    ab = 10.0
+    vaMax = 51
+    vm = 0.03
+    vb = 0.0
+    rhMax = 2
+    hm = 10.0
+    hb = 65.0
+elif SINGLE_MATRIX:
+    tgMax = 1
+    gm = 10.0
+    gb = 45.0
+    taMax = 101
+    am = 1.0
+    ab = 0.0
+    vaMax = 101
+    vm = 0.01
+    vb = 0.0
+    rhMax = 1
+    hm = 10.0
+    hb = 70.0
+WBGT_PSY = np.zeros((tgMax, taMax, vaMax, rhMax))
+WBGT_ISO = np.zeros((tgMax, taMax, vaMax, rhMax))
+WBGT_LIL = np.zeros((tgMax, taMax, vaMax, rhMax))
+
+
+if (GENERATE_MATRICES):
     total = tgMax*taMax*vaMax*rhMax
     count = 0
     for Tg in range (0, tgMax):
@@ -275,55 +403,230 @@ if (GENERATE_MASTER_ARRAY):
                 v = vm*Va+vb
                 for Hum in range(0,rhMax):
                     h = hm*Hum+hb
-                    # w = approximate_wet_bulb_psychro(v, a, g, h, 1013.5)
-                    w = approximate_wet_bulb_ISO(v, a, g, h)
-                    WBGT[Tg, Ta, Va, Hum] = 0.7*w + 0.2*g + 0.1*a
+                    if RUN_PSYCHRO:
+                        w_PSY = psychrometric_wet_bulb(a, BARO, h)
+                        WBGT_PSY[Tg, Ta, Va, Hum] = 0.7*w_PSY + 0.2*g + 0.1*a
+                    if RUN_ISO:
+                        w_ISO = approximate_wet_bulb_ISO(v, a, g, h)#, BARO)
+                        WBGT_ISO[Tg, Ta, Va, Hum] = 0.7*w_ISO + 0.2*g + 0.1*a
+                    if RUN_LILJEGREN:
+                        w_LIL = wet_bulb_liljegren(a, h, BARO, v, RAD, Z_ANGLE)
+                        WBGT_LIL[Tg, Ta, Va, Hum] = 0.7*w_LIL + 0.2*g + 0.1*a
                     count = count + 1
             os.system("cls")
-            print("Building matrix...")
+            print("Building matrices...")
             print(f"Progress: {count}/{total} ({(100*count/total):.3f}%)")
         os.system("cls")
-        print("Building matrix...")
+        print("Building matrices...")
         print(f"Progress: {count}/{total} ({(100*count/total):.3f}%)")
-    np.save("WBGTdb.npy", WBGT)
+    if SINGLE_MATRIX:
+        np.save("WBGT_PSYdb1.npy", WBGT_PSY)
+        np.save("WBGT_ISOdb1.npy", WBGT_ISO)
+        np.save("WBGT_LILdb1.npy", WBGT_LIL)
+    else:
+        np.save("WBGT_PSYdb.npy", WBGT_PSY)
+        np.save("WBGT_ISOdb.npy", WBGT_ISO)
+        np.save("WBGT_LILdb.npy", WBGT_LIL)
 else:
-    WBGT = np.load("WBGTdb.npy")
+    if SINGLE_MATRIX:
+        WBGT_PSY = np.load("WBGT_PSYdb1.npy")
+        WBGT_ISO = np.load("WBGT_ISOdb1.npy")
+        WBGT_LIL = np.load("WBGT_Ldb1.npy")
+    else:
+        WBGT_PSY = np.load("WBGT_PSYdb.npy")
+        WBGT_ISO = np.load("WBGT_ISOdb.npy")
+        WBGT_LIL = np.load("WBGT_Ldb.npy")
 
 
-image1 = WBGT[0,:,:,0].transpose()
-image2 = WBGT[1,:,:,0].transpose()
-image3 = WBGT[0,:,:,1].transpose()
-image4 = WBGT[1,:,:,1].transpose()
+if SINGLE_MATRIX:
+    if RUN_PSYCHRO and RUN_ISO and RUN_LILJEGREN:
+        fig, axes = plt.subplot_mosaic([['plot1', 'plot2', 'plot3']], layout='tight')
+        plt.subplot(131)
+        plt.imshow(WBGT_PSY[0,:,:,0].transpose(), cmap='coolwarm', origin='lower')
+        plt.setp(axes['plot1'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+        plt.title(f"Psychrometric Model: Ta x Va; Tg,RH={gm*0+gb:.1f},{hm*0+hb:.1f}")
+        plt.xlabel("Dry bulb temp")
+        plt.ylabel("Air velocity")
+        plt.colorbar()
+        plt.subplot(132)
+        plt.imshow(WBGT_ISO[0,:,:,0].transpose(), cmap='coolwarm', origin='lower')
+        plt.setp(axes['plot2'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+        plt.title(f"ISO Model: Ta x Va; Tg,RH={gm*0+gb:.1f},{hm*0+hb:.1f}")
+        plt.xlabel("Dry bulb temp")
+        plt.ylabel("Air velocity")
+        plt.colorbar()
+        plt.subplot(133)
+        plt.imshow(WBGT_LIL[0,:,:,0].transpose(), cmap='coolwarm', origin='lower')
+        plt.setp(axes['plot3'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+        plt.title(f"Liljegren Model: Ta x Va; Tg,RH={gm*0+gb:.1f},{hm*0+hb:.1f}")
+        plt.xlabel("Dry bulb temp")
+        plt.ylabel("Air velocity")
+        plt.colorbar()
+    if RUN_ISO and RUN_LILJEGREN:
+        fig, axes = plt.subplot_mosaic([['plot1', 'plot2']], layout='tight')
+        plt.subplot(121)
+        plt.imshow(WBGT_ISO[0,:,:,0].transpose(), cmap='coolwarm', origin='lower')
+        plt.setp(axes['plot1'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+        plt.title(f"ISO Model: Ta x Va; Tg,RH={gm*0+gb:.1f},{hm*0+hb:.1f}")
+        plt.xlabel("Dry bulb temp")
+        plt.ylabel("Air velocity")
+        plt.colorbar()
+        plt.subplot(122)
+        plt.imshow(WBGT_LIL[0,:,:,0].transpose(), cmap='coolwarm', origin='lower')
+        plt.setp(axes['plot2'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+        plt.title(f"Liljegren Model: Ta x Va; Tg,RH={gm*0+gb:.1f},{hm*0+hb:.1f}")
+        plt.xlabel("Dry bulb temp")
+        plt.ylabel("Air velocity")
+        plt.colorbar()
+    elif RUN_ISO:
+        fig, axes = plt.subplot_mosaic([['plot1']], layout='tight')
+        plt.imshow(WBGT_ISO[0,:,:,0], cmap='coolwarm', origin='lower')
+        plt.setp(axes['plot1'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+        plt.title("ISO Model: Ta x Va (RH=60,tg=50)")
+        plt.xlabel("Dry bulb temp")
+        plt.ylabel("Air velocity")
+        plt.colorbar()
+    elif RUN_LILJEGREN:
+        fig, axes = plt.subplot_mosaic([['plot1']], layout='tight')
+        plt.imshow(WBGT_LIL[0,:,:,0].transpose(), cmap='coolwarm', origin='lower')
+        plt.setp(axes['plot1'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+        plt.title("Liljegren Model: Ta x Va (RH=60,tg=50)")
+        plt.xlabel("Dry bulb temp")
+        plt.ylabel("Air velocity")
+        plt.colorbar()
+elif RUN_ISO and RUN_LILJEGREN:
+    image1 = WBGT_ISO[0,:,:,0].transpose()
+    image2 = WBGT_ISO[1,:,:,0].transpose()
+    image3 = WBGT_ISO[0,:,:,1].transpose()
+    image4 = WBGT_ISO[1,:,:,1].transpose()
+    image5 = WBGT_LIL[0,:,:,0].transpose()
+    image6 = WBGT_LIL[1,:,:,0].transpose()
+    image7 = WBGT_LIL[0,:,:,1].transpose()
+    image8 = WBGT_LIL[1,:,:,1].transpose()
+    fig, axes = plt.subplot_mosaic([['plot1', 'plot2', 'plot3', 'plot4'], ['plot5', 'plot6', 'plot7', 'plot8']], layout='tight')
+    plt.subplot(241)
+    plt.imshow(image1, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot1'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=60,tg=50)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(242)
+    plt.imshow(image2, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot2'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=60,tg=60)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(243)
+    plt.imshow(image3, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot3'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=70,tg=50)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(244)
+    plt.imshow(image4, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot4'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=70,tg=60)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(245)
+    plt.imshow(image5, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot5'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=60,tg=50)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(246)
+    plt.imshow(image6, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot6'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=60,tg=60)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(247)
+    plt.imshow(image7, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot7'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=70,tg=50)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(248)
+    plt.imshow(image8, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot8'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=70,tg=60)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+elif RUN_ISO:
+    image1 = WBGT_ISO[0,:,:,0].transpose()
+    image2 = WBGT_ISO[1,:,:,0].transpose()
+    image3 = WBGT_ISO[0,:,:,1].transpose()
+    image4 = WBGT_ISO[1,:,:,1].transpose()
+    fig, axes = plt.subplot_mosaic([['plot1', 'plot2'], ['plot3', 'plot4']], layout='tight')
+    plt.subplot(241)
+    plt.imshow(image1, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot1'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=60,tg=50)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(222)
+    plt.imshow(image2, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot2'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=60,tg=60)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(223)
+    plt.imshow(image3, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot3'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=70,tg=50)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(224)
+    plt.imshow(image4, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot4'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=70,tg=60)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+elif RUN_LILJEGREN:
+    image1 = WBGT_LIL[0,:,:,0].transpose()
+    image2 = WBGT_LIL[1,:,:,0].transpose()
+    image3 = WBGT_LIL[0,:,:,1].transpose()
+    image4 = WBGT_LIL[1,:,:,1].transpose()
+    fig, axes = plt.subplot_mosaic([['plot1', 'plot2'], ['plot3', 'plot4']], layout='tight')
+    plt.subplot(221)
+    plt.imshow(image1, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot1'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=60,tg=50)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(222)
+    plt.imshow(image2, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot2'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=60,tg=60)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(223)
+    plt.imshow(image3, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot3'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=70,tg=50)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
+    plt.subplot(224)
+    plt.imshow(image4, cmap='coolwarm', origin='lower')
+    plt.setp(axes['plot4'], xticks=np.linspace(0,50,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,50,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
+    plt.title("Ta x Va (RH=70,tg=60)")
+    plt.xlabel("Dry bulb temp")
+    plt.ylabel("Air velocity")
+    plt.colorbar()
 
-# fig, axes = plt.subplots(2,4, layout='tight')
-# fig, axes = plt.subplot_mosaic([['plot1', 'plot2', 'plot3', 'plot4'], ['plot5', 'plot6', 'plot7', 'plot8']], layout='tight')
-fig, axes = plt.subplot_mosaic([['plot1', 'plot2'], ['plot3', 'plot4']], layout='tight')
-plt.subplot(221)
-plt.imshow(image1, cmap='coolwarm', origin='lower')
-plt.setp(axes['plot1'], xticks=np.linspace(0,200,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,200,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
-plt.title("Ta x Va (RH=60,tg=50)")
-plt.xlabel("Dry bulb temp")
-plt.ylabel("Air velocity")
-plt.colorbar()
-plt.subplot(222)
-plt.imshow(image2, cmap='coolwarm', origin='lower')
-plt.setp(axes['plot2'], xticks=np.linspace(0,200,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,200,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
-plt.title("Ta x Va (RH=60,tg=60)")
-plt.xlabel("Dry bulb temp")
-plt.ylabel("Air velocity")
-plt.colorbar()
-plt.subplot(223)
-plt.imshow(image3, cmap='coolwarm', origin='lower')
-plt.setp(axes['plot3'], xticks=np.linspace(0,200,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,200,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
-plt.title("Ta x Va (RH=70,tg=50)")
-plt.xlabel("Dry bulb temp")
-plt.ylabel("Air velocity")
-plt.colorbar()
-plt.subplot(224)
-plt.imshow(image4, cmap='coolwarm', origin='lower')
-plt.setp(axes['plot4'], xticks=np.linspace(0,200,11), xticklabels=np.linspace(10,ab+am*(taMax-1),11).round(3), yticks=np.linspace(0,200,6), yticklabels=np.linspace(0,vb+vm*(vaMax-1),6).round(3))
-plt.title("Ta x Va (RH=70,tg=60)")
-plt.xlabel("Dry bulb temp")
-plt.ylabel("Air velocity")
-plt.colorbar()
 plt.show()
