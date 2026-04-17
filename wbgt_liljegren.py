@@ -2,7 +2,7 @@ import numpy as np
 from scipy.optimize import brentq
 
 # Input variables:
-WINDSPEED_MPS   = 1.0
+WINDSPEED_MPS   = 0.6
 DRYBULBTEMP_C   = 35
 GLOBETEMP_C     = 50
 HUMIDITY_PERCENT= 35
@@ -47,7 +47,6 @@ def e_sat(temp_C):
         return 100 * (6.1121 * np.exp((18.678 - (temp_C / 234.5)) * (temp_C / (257.14 + temp_C))) )
     return 100 * (6.1121 * np.exp((23.036 - (temp_C / 333.7)) * (temp_C / (279.82 + temp_C))) )
 
-
 # Returns "ΔF_net/A" term using Eq.(12) from Liljegren:
 def deltaFnetPerA(zenithAngle, S_rad, temp_aC, temp_wC):
     S_max = 0
@@ -63,7 +62,11 @@ def deltaFnetPerA(zenithAngle, S_rad, temp_aC, temp_wC):
 # Returns natural wet bulb temp (t_nwb) in °C from atmospheric parameters, as per Liljegren (2008):
 def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, zenithAngle_deg):
     # Final target value, wet bulb temperature:
-    t_wC = t_aC                         # ambient (dry bulb) temp in Celsius, used as starting guess for wet bulb
+    t_wCguess = t_aC                         # ambient (dry bulb) temp in Celsius, used as starting guess for wet bulb
+    t_wDiff = 0
+    prevDiff = 0
+    dir = -1
+    incr = 10
 
     # input conversions:
     t_aK = t_aC + 273.15                # Celsius -> Kelvin
@@ -73,8 +76,6 @@ def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, z
     S = radiance_Wpm2                   # N/A; easier variable name
     s_za = zenithAngle_deg              # approx. avg. solar zenith angle, degrees TODO: get actual data from lat/long/time?
 
-    # e_sa = e_sat(t_aC)                                              # saturation vapor pressure at ambient temperature, Pascals
-    # e_a = rh * e_sa                                                 # partial water vapor pressure at ambient temperature, Pascals
     e_a = rh * e_sat(t_aC)                                          # partial water vapor pressure at ambient temperature, Pascals
     k = 0.0241 * np.float_power(t_aK/273.15,0.9)                    # thermal conductivity of air, W/m*k
     q = 0.622 * e_a / (P-0.378*e_a)                                 # specific humidity, ratio
@@ -88,24 +89,34 @@ def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, z
     
     h = (k/D)*b*np.float_power(Re,1-c)*np.float_power(Pr,1-a)       # convective heat coefficient, W/m^2*K
 
-    def computeEq9(t_wCguess):
+    safetyCheck = 1000
+    while safetyCheck > 0:
+        safetyCheck -= 1
         # Calculate new values:
-        # e_sw = e_sat(t_wC)                                  # saturation vapor pressure at wet bulb temperature, Pascals
-        # e_w = rh * e_sw                                     # partial water vapor pressure at wet bulb temperature, Pascals
         e_w = e_sat(t_wCguess)                              # saturation vapor pressure at wet bulb temperature, Pascals
         DFnetPerA = deltaFnetPerA(s_za, S, t_aC, t_wCguess) # Eq.(12) result
         deltaH = 2500900 - 2439*t_wCguess                   # latent heat of vaporization at wet bulb temp, J/kg
 
         # Eq.(9):
-        t_wCResult = t_aC-(deltaH/c_p) * (M_h2o/M_air) * np.float_power(Pr/Sc,a) * ((e_w-e_a)/(P-e_w)) + (DFnetPerA/h)
+        t_wCResult = t_aC - (deltaH/c_p)*(M_h2o/M_air)*np.float_power(Pr/Sc,a)*((e_w-e_a)/(P-e_w)) + (DFnetPerA/h)
+        prevDiff = t_wDiff
         t_wDiff = t_wCResult - t_wCguess
-        return t_wDiff                                  # difference between guess and calculation; guess is correct when t_wDiff≈0
-    try:
-        # root finding algorithm: returns argument value for which the passed function returns 0±xtol
-        return brentq(computeEq9, -273.15, 1000.0, xtol=0.02, maxiter=1000)
-    except ValueError:
-        print("EXCEPTION: NO ROOTS FOUND IN SPECIFIED RANGE. RETURNED NAN.")
+
+        if abs(t_wDiff) < 0.02: break
+
+        if (t_wDiff > 0 and prevDiff < 0) or (t_wDiff < 0 and prevDiff > 0):
+            dir *= -1
+            incr /= 10
+        elif t_wCguess < -273.15 and dir == -1:
+            dir = 1
+        
+        t_wCguess += incr * dir
+
+    if safetyCheck <= 0:
+        print("ERROR: NO ROOTS FOUND. RETURNED NAN.")
         return np.nan
+
+    return t_wCguess
 
 if __name__ == "__main__":
     WBT = wet_bulb_liljegren(DRYBULBTEMP_C, HUMIDITY_PERCENT, PRESSURE_MBAR, WINDSPEED_MPS, IRRADIANCE_WPM2, ZENITHANGLE_DEG)

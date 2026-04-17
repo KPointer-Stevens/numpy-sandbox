@@ -13,6 +13,8 @@ RUN_LILJEGREN = True        # Process heatmap for Liljegren model
 COLORMAP = mpl.colors.ListedColormap(mpl.colormaps['coolwarm'](np.linspace(0.0, 1.0, 256)))
 COLORMAP_ALT = mpl.colors.ListedColormap(mpl.colormaps['RdYlGn'](np.linspace(1.0, 0.0, 256)))
 
+ERROR_COUNT = 0
+
 # Standard inputs for single gen:
 V_A = 0.5
 T_A = 35
@@ -22,29 +24,36 @@ BARO = 1020
 RAD = 850
 Z_ANGLE = 35
 
+
 # Universal constants:
-pi = 3.14159265359                  # ratio of a circle's circumference to its diameter
-sigma = 0.0000000567                # Stefan-Boltzmann constant, W/m^2*K^4
-M_h2o = 0.018015                    # molecular weight of water, kg/mol
-M_air = 0.02897                     # molecular weight of air, kg/mol
-mu_0 = 0.00001716                   # Sutherland reference constant for air viscosity at reference temp, kg/ms
-t_0K = 273.15                       # reference temperature for mu_0, Kelvin
-S_K = 110.4                         # Sutherland temperature, Kelvin
-R_gas = 8.31446                     # molar gas constant, J/mol*K
-R_air = R_gas/M_air                 # specific gas constant for air, J
-c_p = 1005.0                        # specific heat capacity of dry air, J/K*kg
-P_0 = 101325                        # pressure constant?, Pascals  TODO: verify
-D_0 = 0.0000226                     # diffusivity constant for water vapor in air?, m^2/s  TODO: verify
-g = 9.81                            # Earth gravitational constant, m/s^2
-S_0 = 1367                          # maximum solar irradiance sans atmosphere, W/m^2
-# Experimental constants (experimentally-fixed variables):
-D_wick = 0.007                      # wick diameter, m
-L_wick = 0.0254                     # wick length, m
-A_wick = pi*D_wick*L_wick           # wick surface area, as prescribed in Liljegren (m^2)
-E_wick = 0.95                       # wick emissivity, ratio
-E_atm = 0.85                        # atmospheric emissivity, ratio TODO: double-check approximation
-alpha_wick = 0.95                   # wick albedo, ratio
-alpha_sfc = 0.45                    # estimated albedo of surface, ratio
+pi = 3.14159265359                      # ratio of a circle's circumference to its diameter
+sigma = 0.0000000567                    # Stefan-Boltzmann constant, W/m^2*K^4
+M_h2o = 0.018015                        # molecular weight of water, kg/mol
+M_air = 0.02897                         # molecular weight of air, kg/mol
+mu_0 = 0.00001716                       # Sutherland reference constant for air viscosity at reference temp, kg/ms
+t_0K = 273.15                           # reference temperature for mu_0, Kelvin
+S_K = 110.4                             # Sutherland temperature, Kelvin
+R_gas = 8.31446                         # molar gas constant, J/mol*K
+R_air = R_gas/M_air                     # specific gas constant for air, J
+c_p = 1005.0                            # specific heat capacity of dry air, J/K*kg
+P_0 = 101325                            # pressure constant?, Pascals
+D_0 = 0.0000226                         # diffusivity constant for water vapor in air, m^2/s
+g = 9.81                                # Earth gravitational constant, m/s^2
+S_0 = 1367                              # maximum solar irradiance sans atmosphere, W/m^2
+
+# a, b, c values prescribed in Liljegren:
+a = 0.56
+b = 0.281
+c = 0.4
+
+# Experimental constants (experimentally-fixed variables, as prescribed in Liljegren):
+D = 0.007                               # wick diameter, m
+L = 0.0254                              # wick length, m
+A = pi*D*L                              # wick surface area, m^2
+E_wick = 0.95                           # wick emissivity, ratio
+E_atm = 0.85                            # atmospheric emissivity, ratio
+alpha_w = 0.95                          # wick albedo, ratio
+alpha_sfc = 0.45                        # surface albedo, ratio
 
 # Calculates rough dew point, for starting guess:
 def dew_pt(DB, RH):
@@ -62,18 +71,14 @@ def dew_pt(DB, RH):
 def mean_radiant_from_globe(GT, AV, DB):
     return np.float_power(np.float_power(GT+273,4)+(((110000000*np.float_power(AV,0.6))/(0.95*np.float_power(0.15,0.4)))*(GT-DB)),0.25)-273
 
-# Returns partial vapor pressure in hPa:
+# Returns partial vapor pressure in hPa, given temperature in C:
 def Buck_equation(temp_C):
-    t = temp_C
-    if t == -257.14: t = -257.141
-    return 6.1121 * np.exp((18.678-(t/234.5))*(t/(257.14+t)))
-
-# Wrapper converting Buck equation result to kiloPascals:
-def Buck_eq_kPa(temp_C):
-    return Buck_equation(temp_C) / 10.0
+    if temp_C >= 0:
+        return 6.1121 * np.exp((18.678 - (temp_C / 234.5)) * (temp_C / (257.14 + temp_C)))
+    return 6.1121 * np.exp((23.036 - (temp_C / 333.7)) * (temp_C / (279.82 + temp_C)))
 
 # Wrapper converting Buck equation result to Pascals:
-def Buck_eq_Pa(temp_C):
+def e_sat(temp_C):
     return 100 * Buck_equation(temp_C)
 
 # Approximates wet bulb temp from v_a, t_a, t_g, RH, and pressure:
@@ -291,57 +296,110 @@ def deltaFnetPerA(zenithAngle, S_rad, temp_aC, temp_wC):
         Sstar = S_rad/S_max
         f_dir = np.exp(3-1.34*Sstar-1.65/Sstar)
     deltaFNetperA_T1 = sigma * E_wick * (0.5 * (1 + E_atm) * np.float_power(temp_aC,4) - np.float_power(temp_wC,4))
-    deltaFNetperA_T2 = (1 - alpha_wick) * S_rad * ((1 - f_dir) * (1 + (D_wick / (4 * L_wick))) + f_dir * ((np.tan(np.deg2rad(zenithAngle)) / pi) + (D_wick / (4 * L_wick)) + alpha_sfc))
+    deltaFNetperA_T2 = (1 - alpha_w) * S_rad * ((1 - f_dir) * (1 + (D / (4*L))) + f_dir * ((np.tan(np.deg2rad(zenithAngle)) / pi) + (D / (4*L)) + alpha_sfc))
     return deltaFNetperA_T1 + deltaFNetperA_T2
 
-# Returns calculated WBT per the method outlined in Liljegren paper:
+# # Returns natural wet bulb temp (t_nwb) in °C from atmospheric parameters, as per Liljegren (2008):
+# def wet_bulb_liljegren_brentq(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, zenithAngle_deg):
+#     # Final target value, wet bulb temperature:
+#     # t_wC = t_aC                         # ambient (dry bulb) temp in Celsius, used as starting guess for wet bulb
+
+#     # input conversions:
+#     t_aK = t_aC + 273.15                # Celsius -> Kelvin
+#     rh = rh_percent/100.0               # percent -> ratio
+#     P = p_mBar*100                      # millibar -> Pascal
+#     V = windspeed_mps                   # N/A; easier variable name
+#     S = radiance_Wpm2                   # N/A; easier variable name
+#     s_za = zenithAngle_deg              # approx. avg. solar zenith angle, degrees TODO: get actual data from lat/long/time?
+
+#     e_a = rh * e_sat(t_aC)                                          # partial water vapor pressure at ambient temperature, Pascals
+#     k = 0.0241 * np.float_power(t_aK/273.15,0.9)                    # thermal conductivity of air, W/m*k
+#     q = 0.622 * e_a / (P-0.378*e_a)                                 # specific humidity, ratio
+#     rho = P / (R_air*t_aK*(1+0.61*q))                               # fluid density of air, kg/m^3
+#     mu = mu_0*np.float_power(t_aK/t_0K,3/2)*(t_0K+S_K)/(t_aK+S_K)   # fluid viscosity of air (Sutherland eq.), kg/m*s
+#     D_v = D_0 * np.float_power(t_aK/273.15,1.75) * P_0/P            # water vapor diffusivity in air, m^2/s
+
+#     Re = (rho*V*D)/mu                                               # Reynolds number (convection strength), unitless
+#     Pr = (c_p*mu)/k                                                 # Prandtl number
+#     Sc = mu/(rho*D_v)                                               # Schmidt number
+    
+#     h = (k/D)*b*np.float_power(Re,1-c)*np.float_power(Pr,1-a)       # convective heat coefficient, W/m^2*K
+
+#     def computeEq9(t_wCguess):
+#         # Calculate new values:
+#         e_w = e_sat(t_wCguess)                              # saturation vapor pressure at wet bulb temperature, Pascals
+#         DFnetPerA = deltaFnetPerA(s_za, S, t_aC, t_wCguess) # Eq.(12) result
+#         deltaH = 2500900 - 2439*t_wCguess                   # latent heat of vaporization at wet bulb temp, J/kg
+
+#         # Eq.(9):
+#         t_wCResult = t_aC - (deltaH/c_p)*(M_h2o/M_air)*np.float_power(Pr/Sc,a)*((e_w-e_a)/(P-e_w)) + (DFnetPerA/h)
+#         t_wDiff = t_wCResult - t_wCguess
+#         return t_wDiff                                  # difference between guess and calculation; guess is correct when t_wDiff≈0
+#     try:
+#         return brentq(computeEq9, -1000.0, 1000.0, xtol=0.02, maxiter=1000)
+#     except ValueError:
+#         print("EXCEPTION: NO ROOTS FOUND IN SPECIFIED RANGE. RETURNED NAN.")
+#         return np.nan
+
+# Returns natural wet bulb temp (t_nwb) in °C from atmospheric parameters, as per Liljegren (2008):
 def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, zenithAngle_deg):
     # Final target value, wet bulb temperature:
-    t_wC = t_aC                         # use ambient temp as starting guess, Celsius
+    t_wCguess = t_aC                         # ambient (dry bulb) temp in Celsius, used as starting guess for wet bulb
+    t_wDiff = 0
+    prevDiff = 0
+    dir = -1
+    incr = 10
 
-    # input unit conversions:
+    # input conversions:
     t_aK = t_aC + 273.15                # Celsius -> Kelvin
     rh = rh_percent/100.0               # percent -> ratio
     P = p_mBar*100                      # millibar -> Pascal
-    V = windspeed_mps                   # N/A; better variable name
-    S = radiance_Wpm2                   # N/A; better variable name
-    s_za = zenithAngle_deg              # solar zenith angle, degrees TODO: estimate mock data? get actual data from lat/long/time?
+    V = windspeed_mps                   # N/A; easier variable name
+    S = radiance_Wpm2                   # N/A; easier variable name
+    s_za = zenithAngle_deg              # approx. avg. solar zenith angle, degrees TODO: get actual data from lat/long/time?
 
-    e_sa = Buck_eq_Pa(t_aC)             # saturation vapor pressure at ambient temperature, Pascals
-    e_a = rh * e_sa                     # partial water vapor pressure at ambient temperature, Pascals
-    A = A_wick                          # wick surface area as prescribed in Liljegren, m^2
+    e_a = rh * e_sat(t_aC)                                          # partial water vapor pressure at ambient temperature, Pascals
     k = 0.0241 * np.float_power(t_aK/273.15,0.9)                    # thermal conductivity of air, W/m*k
-    q = 0.622 * e_a / (P-0.378*e_a)                                 # specific humidity, ratio TODO: should either/both e_a be e_w instead?
+    q = 0.622 * e_a / (P-0.378*e_a)                                 # specific humidity, ratio
     rho = P / (R_air*t_aK*(1+0.61*q))                               # fluid density of air, kg/m^3
     mu = mu_0*np.float_power(t_aK/t_0K,3/2)*(t_0K+S_K)/(t_aK+S_K)   # fluid viscosity of air (Sutherland eq.), kg/m*s
     D_v = D_0 * np.float_power(t_aK/273.15,1.75) * P_0/P            # water vapor diffusivity in air, m^2/s
 
-    Re = (rho*V*D_wick)/mu                                          # Reynolds number (convection strength), unitless TODO: verify?
+    Re = (rho*V*D)/mu                                               # Reynolds number (convection strength), unitless
     Pr = (c_p*mu)/k                                                 # Prandtl number
     Sc = mu/(rho*D_v)                                               # Schmidt number
+    
+    h = (k/D)*b*np.float_power(Re,1-c)*np.float_power(Pr,1-a)       # convective heat coefficient, W/m^2*K
 
-    # a,b,c prescribed by Liljegren:
-    a = 0.56
-    b = 0.281
-    c = 0.4
-    h = (k/D_wick)*b*np.float_power(Re,1-c)*np.float_power(Pr,1-a)  # convective heat coefficient, W/m^2*K
-
-    def computeEq9(t_wCguess):
+    safetyCheck = 1000
+    while safetyCheck > 0:
+        safetyCheck -= 1
         # Calculate new values:
-        e_sw = Buck_eq_Pa(t_wCguess)                             # saturation vapor pressure at wet bulb temperature, Pascals
-        e_w = rh * e_sw                                     # partial water vapor pressure at wet bulb temperature, Pascals
+        e_w = e_sat(t_wCguess)                              # saturation vapor pressure at wet bulb temperature, Pascals
         DFnetPerA = deltaFnetPerA(s_za, S, t_aC, t_wCguess) # Eq.(12) result
         deltaH = 2500900 - 2439*t_wCguess                   # latent heat of vaporization at wet bulb temp, J/kg
 
         # Eq.(9):
-        t_wCResult = t_aC-(deltaH/c_p) * (M_h2o/M_air) * np.float_power(Pr/Sc,a) * ((e_w-e_a)/(P-e_w)) + (DFnetPerA/h)
+        t_wCResult = t_aC - (deltaH/c_p)*(M_h2o/M_air)*np.float_power(Pr/Sc,a)*((e_w-e_a)/(P-e_w)) + (DFnetPerA/h)
+        prevDiff = t_wDiff
         t_wDiff = t_wCResult - t_wCguess
-        return t_wDiff                                      # difference between guess and calculation; guess is correct when t_wDiff≈0
-    try:
-        return brentq(computeEq9, -273.15, 600.0, xtol=0.02, maxiter=1000)
-    except ValueError:
-        print("EXCEPTION: NO ROOTS FOUND IN GIVEN RANGE. RETURNING NAN.")
+
+        if abs(t_wDiff) < 0.02: break
+
+        if (t_wDiff > 0 and prevDiff < 0) or (t_wDiff < 0 and prevDiff > 0):
+            dir *= -1
+            incr /= 10
+        elif t_wCguess < -273.15 and dir == -1:
+            dir = 1
+        
+        t_wCguess += incr * dir
+
+    if safetyCheck <= 0:
+        print("ERROR: NO ROOTS FOUND. RETURNED NAN.")
         return np.nan
+
+    return t_wCguess
+
     
 def map_all_dims(fullMatrix):
     # select default index:
@@ -482,30 +540,30 @@ if __name__ == '__main__':
     rb = 0
 
     if GENERATE_NEW:
-        taMax = 26
-        am = 1
-        ab = 30.0
-        rhMax = 26
-        hm = 4
+        taMax = 11
+        am = 2
+        ab = 20.0
+        rhMax = 11
+        hm = 10
         hb = 0.0
-        bpMax = 26
-        pm = 8
-        pb = 900
-        tgMax = 26
-        gm = 1
+        bpMax = 11
+        pm = 10
+        pb = 950
+        tgMax = 11
+        gm = 2
         gb = 40.0
-        vaMax = 25
-        vm = 0.04
-        vb = 0.04
-        rsMax = 26
-        rm = 48
-        rb = 0
+        vaMax = 10
+        vm = 0.2
+        vb = 0.2
+        rsMax = 11
+        rm = 50
+        rb = 600
     if SINGLE_MATRIX:
         taMax = 101
         am = 0.5
         ab = 10.0
         rhMax = 101
-        hm = 0.1
+        hm = 1.0
         hb = 0.0
         bpMax = 1
         pm = 10
@@ -515,7 +573,7 @@ if __name__ == '__main__':
         gb = 50.0
         vaMax = 1
         vm = 0.1
-        vb = 1.0
+        vb = 0.6
         rsMax = 1
         rm = 8
         rb = 650.0
@@ -573,9 +631,11 @@ if __name__ == '__main__':
                 # print(f"Building matrices...\nProgress: {count}/{total} ({(100*count/total):.3f}%)")
             os.system("cls")
             print(f"Building matrices...\nProgress: {count}/{total} ({(100*count/total):.3f}%)")
-                            
+
+        if ERROR_COUNT > 0:
+            print(f"\nWARNING: {ERROR_COUNT} matrix cells contain NAN values as a result of inputs failing to produce a root within specified bounds.\n")
+
         if SINGLE_MATRIX:
-            print("saving single...")
             np.save("WBT_PSYdb1.npy", WBT_PSY)
             np.save("WBT_ISOdb1.npy", WBT_ISO)
             np.save("WBT_LILdb1.npy", WBT_LIL)
@@ -583,7 +643,6 @@ if __name__ == '__main__':
             np.save("WBGT_ISOdb1.npy", WBGT_ISO)
             np.save("WBGT_LILdb1.npy", WBGT_LIL)
         else:
-            print("saving multi...")
             np.save("WBT_PSYdb.npy", WBT_PSY)
             np.save("WBT_ISOdb.npy", WBT_ISO)
             np.save("WBT_LILdb.npy", WBT_LIL)
@@ -592,7 +651,6 @@ if __name__ == '__main__':
             np.save("WBGT_LILdb.npy", WBGT_LIL)
     else:
         if SINGLE_MATRIX:
-            print("loading single...")
             WBT_PSY = np.load("WBT_PSYdb1.npy")
             WBT_ISO = np.load("WBT_ISOdb1.npy")
             WBT_LIL = np.load("WBT_LILdb1.npy")
@@ -600,7 +658,6 @@ if __name__ == '__main__':
             WBGT_ISO = np.load("WBGT_ISOdb1.npy")
             WBGT_LIL = np.load("WBGT_LILdb1.npy")
         else:
-            print("loading multi...")
             WBT_PSY = np.load("WBT_PSYdb.npy")
             WBT_ISO = np.load("WBT_ISOdb.npy")
             WBT_LIL = np.load("WBT_LILdb.npy")
