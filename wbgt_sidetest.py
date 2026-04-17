@@ -583,9 +583,9 @@ def calc_WBGT(idx_a, idx_h, idx_p, idx_v, idx_r, idx_g):
 
 # SCRIPT START:
 if __name__ == "__main__":
-    ambientTemp = 25.0
-    globeTemp = 35.0
-    humidity = 75.0
+    ambientTemp = 38.0
+    globeTemp = 50.0
+    humidity = 50.0
     windSpeed = 0.001
     baroPressure = 1020.0
     solarRadiance = 650.0
