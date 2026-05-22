@@ -2,13 +2,13 @@ import numpy as np
 from scipy.optimize import brentq
 
 # Input variables:
-WINDSPEED_MPS   = 0.6
-DRYBULBTEMP_C   = 35
-GLOBETEMP_C     = 50
-HUMIDITY_PERCENT= 35
-PRESSURE_MBAR   = 1020
-IRRADIANCE_WPM2 = 650
-ZENITHANGLE_DEG = 35
+WINDSPEED_MPS   = 2.2
+DRYBULBTEMP_C   = 35.0
+GLOBETEMP_C     = 35.0
+HUMIDITY_PERCENT= 10.0
+PRESSURE_MBAR   = 950.0
+IRRADIANCE_WPM2 = 100.0
+ZENITHANGLE_DEG = 35.0
 
 # Universal constants:
 pi = 3.14159265359                      # ratio of a circle's circumference to its diameter
@@ -49,6 +49,8 @@ def e_sat(temp_C):
 
 # Returns "ΔF_net/A" term using Eq.(12) from Liljegren:
 def deltaFnetPerA(zenithAngle, S_rad, temp_aC, temp_wC):
+    if S_rad == 0:
+        return 0.0
     S_max = 0
     f_dir = 0
     if zenithAngle <= 89.5:
@@ -61,7 +63,7 @@ def deltaFnetPerA(zenithAngle, S_rad, temp_aC, temp_wC):
 
 # Returns natural wet bulb temp (t_nwb) in °C from atmospheric parameters, as per Liljegren (2008):
 def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, zenithAngle_deg):
-    # Final target value, wet bulb temperature:
+    # # Final target value, wet bulb temperature:
     t_wCguess = t_aC                         # ambient (dry bulb) temp in Celsius, used as starting guess for wet bulb
     t_wDiff = 0
     prevDiff = 0
@@ -77,21 +79,25 @@ def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, z
     s_za = zenithAngle_deg              # approx. avg. solar zenith angle, degrees TODO: get actual data from lat/long/time?
 
     e_a = rh * e_sat(t_aC)                                          # partial water vapor pressure at ambient temperature, Pascals
-    k = 0.0241 * np.float_power(t_aK/273.15,0.9)                    # thermal conductivity of air, W/m*k
+    # k = 0.0241 * np.float_power(t_aK/273.15,0.9)                    # thermal conductivity of air, W/m*k
+    k = 0.0241 * ((t_aK/273.15)**(0.9))                             # thermal conductivity of air, W/m*k
     q = 0.622 * e_a / (P-0.378*e_a)                                 # specific humidity, ratio
     rho = P / (R_air*t_aK*(1+0.61*q))                               # fluid density of air, kg/m^3
-    mu = mu_0*np.float_power(t_aK/t_0K,3/2)*(t_0K+S_K)/(t_aK+S_K)   # fluid viscosity of air (Sutherland eq.), kg/m*s
-    D_v = D_0 * np.float_power(t_aK/273.15,1.75) * P_0/P            # water vapor diffusivity in air, m^2/s
+    # mu = mu_0*np.float_power(t_aK/t_0K,3/2)*(t_0K+S_K)/(t_aK+S_K)   # fluid viscosity of air (Sutherland eq.), kg/m*s
+    mu = mu_0*((t_aK/t_0K)**(3/2))*(t_0K+S_K)/(t_aK+S_K)            # fluid viscosity of air (Sutherland eq.), kg/m*s
+    # D_v = D_0 * np.float_power(t_aK/273.15,1.75) * P_0/P            # water vapor diffusivity in air, m^2/s
+    D_v = D_0 * ((t_aK/273.15)**(1.75)) * P_0/P                     # water vapor diffusivity in air, m^2/s
 
     Re = (rho*V*D)/mu                                               # Reynolds number (convection strength), unitless
     Pr = (c_p*mu)/k                                                 # Prandtl number
     Sc = mu/(rho*D_v)                                               # Schmidt number
-    
-    h = (k/D)*b*np.float_power(Re,1-c)*np.float_power(Pr,1-a)       # convective heat coefficient, W/m^2*K
 
-    safetyCheck = 1000
-    while safetyCheck > 0:
-        safetyCheck -= 1
+    # h = (k/D)*b*np.float_power(Re,1-c)*np.float_power(Pr,1-a)       # convective heat coefficient, W/m^2*K
+    h = (k/D)*b*(Re**(1-c))*(Pr**(1-a))                             # convective heat coefficient, W/m^2*K
+
+    iLimiter = 1000
+    while iLimiter > 0:
+        iLimiter -= 1
         # Calculate new values:
         e_w = e_sat(t_wCguess)                              # saturation vapor pressure at wet bulb temperature, Pascals
         DFnetPerA = deltaFnetPerA(s_za, S, t_aC, t_wCguess) # Eq.(12) result
@@ -112,7 +118,7 @@ def wet_bulb_liljegren(t_aC, rh_percent, p_mBar, windspeed_mps, radiance_Wpm2, z
         
         t_wCguess += incr * dir
 
-    if safetyCheck <= 0:
+    if iLimiter <= 0:
         print("ERROR: NO ROOTS FOUND. RETURNED NAN.")
         return np.nan
 

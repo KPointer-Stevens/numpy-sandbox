@@ -1,0 +1,62 @@
+from tkinter import *
+from tkinter import ttk
+
+
+class FahrenheitToCelsius:
+    def __init__(self, root):
+        
+        root.title("test window")
+        self.primed = BooleanVar()
+        mainframe = ttk.Frame(root, padding=(3,3,12,12))
+        mainframe.grid(column=0, row=0, sticky=(W,E))
+
+        self.fDeg = StringVar()
+        fBox = ttk.Entry(mainframe, width=7, textvariable=self.fDeg)
+        fBox.grid(row=1, column=1)#, sticky=(W,E))
+        ttk.Button(mainframe, text="°F is equal to ", command=self.FtoC).grid(row=1, column=2, sticky=(W,E))
+        self.cResult = StringVar()
+        toCBox = ttk.Label(mainframe, textvariable=self.cResult).grid(row=1, column=3, sticky=E)
+        ttk.Label(mainframe, text="°C").grid(row=1, column=4, sticky=W)
+
+        self.cDeg = StringVar()
+        cBox = ttk.Entry(mainframe, width=7, textvariable=self.cDeg)
+        cBox.grid(row=2, column=1, sticky=(W,E))
+        ttk.Button(mainframe, text="°C is equal to ", command=self.CtoF).grid(row=2, column=2, sticky=(W,E))
+        self.fResult = StringVar()
+        toFBox = ttk.Label(mainframe, textvariable=self.fResult).grid(row=2, column=3, sticky=E)
+        ttk.Label(mainframe, text="°F").grid(row=2, column=4, sticky=W)
+
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+        mainframe.columnconfigure(2, weight=1)
+        for child in mainframe.winfo_children():
+            child.grid_configure(padx=3,pady=3)
+
+        fBox.focus()
+        root.bind("<Return>", self.crossCalc)
+        root.bind("<FocusOut>", self.kill)
+
+    def crossCalc(self, *args):
+        self.FtoC(self)
+        self.CtoF(self)
+    def FtoC(self, *args):
+        self.primed = True
+        try:
+            value = float(self.fDeg.get())
+            self.cResult.set(f"{(value-32)*5/9:.2f}")
+        except ValueError:
+            pass
+    def CtoF(self, *args):
+        self.primed = True
+        try:
+            value = float(self.cDeg.get())
+            self.fResult.set(f"{value*9/5+32:.2f}")
+        except ValueError:
+            pass
+    def kill(self, *args):
+        if self.primed == True: root.destroy()
+
+root = Tk()
+root.geometry("240x120+480+240")
+FahrenheitToCelsius(root)
+root.mainloop()
