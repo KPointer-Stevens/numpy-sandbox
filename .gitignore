@@ -14,3 +14,10 @@ WBGT_LILdb.npy
 WBGT_LILdb1.npy
 *.npy
 *.npy
+WBGT_PSYdb1.npy
+WBGT_psydb.npy
+WBGT_LILdb1.npy
+WBGT_LILdb.npy
+WBGT_ISOdb1.npy
+WBGT_ISOdb.npy
+*.npy
